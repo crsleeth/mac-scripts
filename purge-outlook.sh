@@ -25,8 +25,8 @@ BACKUP_ROOT=".ms-purge-backup"   # created inside each user's home
 ### ────────────────────────────────────────────────────────────────────────
 
 MSGRP="UBF8T346G9"
-APP="/Applications/Microsoft Outlook.app"
 TS="$(date +%Y%m%d-%H%M%S)"
+CU=$(stat -f%Su /dev/console 2>/dev/null)   # logged-in user ("root" if none)
 FAILS=0
 log(){ printf '%s\n' "$*"; }
 warn(){ log "  WARN: $*"; FAILS=$((FAILS+1)); }
@@ -49,29 +49,36 @@ backup_item(){
   mv "$src" "$dest" && log "  backed up: $src" || warn "could not move $src"
 }
 
+# quit_apps <path regex> <app name>... — ask each app to quit in the logged-in
+# user's session (root can't reach it otherwise), wait up to 10s, then kill
+# whatever is still running from a path matching the regex.
+quit_apps(){
+  local re="$1" app; shift
+  pgrep -f "$re" >/dev/null || { log "  not running"; return 0; }
+  if $DRY_RUN; then log "  [dry-run] quit: $*"; return 0; fi
+  for app in "$@"; do
+    { [ -d "/Applications/$app.app" ] && [ -n "$CU" ] && [ "$CU" != "root" ]; } || continue
+    launchctl asuser "$(id -u "$CU")" sudo -u "$CU" osascript -e \
+      "if application \"$app\" is running then tell application \"$app\" to quit" \
+      >/dev/null 2>&1 &
+  done
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pgrep -f "$re" >/dev/null || return 0; sleep 1
+  done
+  pkill -f "$re" 2>/dev/null && sleep 1
+  pkill -9 -f "$re" 2>/dev/null
+  return 0
+}
+
 # ─── 1. quit processes ─────────────────────────────────────────────────────
 # Matched by bundle path, so helpers and extensions are included and nothing
 # outside the Outlook bundle is.
 log "Quitting Outlook..."
-if ! pgrep -f "$APP/" >/dev/null; then
-  log "  not running"
-elif $DRY_RUN; then
-  log "  [dry-run] quit: $APP"
-else
-  # ask nicely in the logged-in user's session, then kill whatever is left
-  cu=$(stat -f%Su /dev/console 2>/dev/null)
-  [ -n "$cu" ] && [ "$cu" != "root" ] && launchctl asuser "$(id -u "$cu")" \
-    sudo -u "$cu" osascript -e 'quit app "Microsoft Outlook"' >/dev/null 2>&1 &
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    pgrep -f "$APP/" >/dev/null || break; sleep 1
-  done
-  pkill -f "$APP/" 2>/dev/null && sleep 1
-  pkill -9 -f "$APP/" 2>/dev/null
-fi
+quit_apps '/Applications/Microsoft Outlook\.app/' "Microsoft Outlook"
 
 # ─── 2. app bundle ─────────────────────────────────────────────────────────
 log "Removing app bundle..."
-rm_path "$APP"
+rm_path "/Applications/Microsoft Outlook.app"
 
 # ─── 3. receipts (outlook only; shared office packages stay) ───────────────
 log "Forgetting receipts..."
